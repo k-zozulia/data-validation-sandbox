@@ -216,3 +216,25 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Node
+node_modules/
+dist/
+frontend/build/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Artifacts
+*.log
+.pytest_cache/
