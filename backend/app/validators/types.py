@@ -1,18 +1,20 @@
-"""Individual validator functions, registered by rule name.
+"""Individual validator functions, registered by rule name."""
 
-Each validator inspects one column (a pandas Series) and returns a Violation if
-the rule is broken, or None if it passes.
-"""
 from __future__ import annotations
 
 from typing import Callable
 
 import pandas as pd
+import regex
 from pandas.api import types as pdt
 
 from app.models.schemas import Violation
 
 VALIDATORS: dict[str, Callable[..., Violation | None]] = {}
+
+# Per-value guard against catastrophic backtracking (ReDoS). The `regex` library
+# supports a timeout directly, which is thread-safe (unlike signal-based guards).
+_REGEX_TIMEOUT_SEC = 1.0
 
 
 def register(name: str):
@@ -25,6 +27,13 @@ def register(name: str):
 def _rows(mask: pd.Series) -> list[int]:
     """Row indices where the boolean mask is True."""
     return [int(i) for i in mask[mask].index.tolist()]
+
+
+def _is_missing(value) -> bool:
+    """True for a missing scalar; a list/tuple is never 'missing'."""
+    if isinstance(value, (list, tuple)):
+        return False
+    return value is None or pd.isna(value)
 
 
 @register("not_null")
@@ -91,3 +100,89 @@ def check_unique(series: pd.Series, column: str) -> Violation | None:
     return Violation(column=column, rule="unique",
                      message=f"{len(rows)} row(s) involved in duplicate values",
                      failed_count=len(rows), failed_rows=rows)
+
+
+@register("regex")
+def check_regex(series: pd.Series, column: str, pattern: str) -> Violation | None:
+    try:
+        compiled = regex.compile(pattern)
+    except regex.error as exc:
+        return Violation(column=column, rule="regex",
+                         message=f"Invalid regex pattern: {exc}")
+    failed: list[int] = []
+    for idx, value in series.items():
+        if pd.isna(value):
+            continue
+        try:
+            if compiled.search(str(value), timeout=_REGEX_TIMEOUT_SEC) is None:
+                failed.append(int(idx))
+        except TimeoutError:
+            return Violation(column=column, rule="regex",
+                             message="Regex timed out (possible ReDoS) — check the pattern")
+    if not failed:
+        return None
+    return Violation(column=column, rule="regex",
+                     message=f"{len(failed)} value(s) do not match the pattern",
+                     failed_count=len(failed), failed_rows=failed)
+
+
+# --- Array validators (for list-valued columns coming from JSON) ---
+
+_ELEMENT_TYPES: dict[str, Callable[[object], bool]] = {
+    "int": lambda x: isinstance(x, int) and not isinstance(x, bool),
+    "float": lambda x: isinstance(x, float),
+    "numeric": lambda x: isinstance(x, (int, float)) and not isinstance(x, bool),
+    "str": lambda x: isinstance(x, str),
+    "bool": lambda x: isinstance(x, bool),
+}
+
+
+@register("array_length")
+def check_array_length(series: pd.Series, column: str,
+                       min=None, max=None) -> Violation | None:
+    failed: list[int] = []
+    for idx, value in series.items():
+        if _is_missing(value):
+            continue
+        if not isinstance(value, (list, tuple)):
+            failed.append(int(idx))
+            continue
+        n = len(value)
+        if (min is not None and n < min) or (max is not None and n > max):
+            failed.append(int(idx))
+    if not failed:
+        return None
+    return Violation(column=column, rule="array_length",
+                     message=f"{len(failed)} array(s) with a disallowed length",
+                     failed_count=len(failed), failed_rows=failed)
+
+
+@register("array_items")
+def check_array_items(series: pd.Series, column: str,
+                      type=None, min=None, max=None) -> Violation | None:
+    type_pred = _ELEMENT_TYPES.get(type) if type else None
+    if type and type_pred is None:
+        return Violation(column=column, rule="array_items",
+                         message=f"Unknown item type '{type}'")
+
+    failed: list[int] = []
+    for idx, value in series.items():
+        if _is_missing(value):
+            continue
+        if not isinstance(value, (list, tuple)):
+            failed.append(int(idx))
+            continue
+        for element in value:
+            is_number = isinstance(element, (int, float)) and not isinstance(element, bool)
+            if type_pred and not type_pred(element):
+                failed.append(int(idx)); break
+            if min is not None or max is not None:
+                if not is_number:
+                    failed.append(int(idx)); break
+                if (min is not None and element < min) or (max is not None and element > max):
+                    failed.append(int(idx)); break
+    if not failed:
+        return None
+    return Violation(column=column, rule="array_items",
+                     message=f"{len(failed)} array(s) with a disallowed element",
+                     failed_count=len(failed), failed_rows=failed)

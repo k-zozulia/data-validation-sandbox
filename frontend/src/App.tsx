@@ -86,7 +86,7 @@ export default function App() {
     <div style={{ maxWidth: 900, margin: "2rem auto", fontFamily: "system-ui, sans-serif", padding: "0 1rem" }}>
       <h1>Data Validation Sandbox</h1>
 
-      <input type="file" accept=".csv" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+      <input type="file" accept=".csv,.json,.parquet" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
 
       <div style={{ margin: "1rem 0", display: "flex", gap: 8 }}>
         <button onClick={onProfile} disabled={busy}>1. Profile &amp; generate rules</button>
