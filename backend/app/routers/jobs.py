@@ -11,7 +11,7 @@ from app.config import settings
 from app.models.schemas import AppException, JobCreatedResponse, JobStatusResponse
 from app.parsers import load_dataframe
 from app.services import storage
-from app.workers.celery_app import full_validate_task, split_dataframe
+from app.workers.celery_app import full_validate_task
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -67,14 +67,22 @@ async def export_job(job_id: str, kind: str):
         raise AppException(409, "not_ready", f"Job is '{status}', export not available yet")
 
     input_raw = await storage.get_value(f"job:{job_id}:input")
-    idx_raw = await storage.get_value(f"job:{job_id}:quarantine_idx")
-    if input_raw is None or idx_raw is None:
+    reasons_raw = await storage.get_value(f"job:{job_id}:reasons")
+    if input_raw is None or reasons_raw is None:
         raise AppException(404, "export_not_found", "Export data expired or unavailable")
 
     data = json.loads(input_raw)
     df = load_dataframe(data["filename"], base64.b64decode(data["file_b64"]))
-    clean, quarantine = split_dataframe(df, json.loads(idx_raw))
-    csv_text = (quarantine if kind == "quarantine" else clean).to_csv(index=False)
+    reasons = {int(k): v for k, v in json.loads(reasons_raw).items()}
+    dirty = sorted(reasons.keys())
+
+    if kind == "quarantine":
+        out_df = df.loc[dirty].copy()
+        # one readable column with all reasons per row: "age: range; email: unique"
+        out_df["_violations"] = ["; ".join(reasons[i]) for i in dirty]
+        csv_text = out_df.to_csv(index=False)
+    else:
+        csv_text = df.drop(index=dirty).to_csv(index=False)
 
     return Response(content=csv_text, media_type="text/csv",
                     headers={"Content-Disposition": f'attachment; filename="{kind}.csv"'})

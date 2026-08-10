@@ -27,6 +27,7 @@ class ColumnProfile(BaseModel):
     unique_count: int
     min: float | None = None
     max: float | None = None
+    is_array: bool = False
 
 
 class DatasetProfile(BaseModel):

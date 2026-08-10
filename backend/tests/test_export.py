@@ -30,3 +30,14 @@ def test_clean_plus_quarantine_equals_original():
     df = pd.DataFrame({"x": list(range(10))})
     clean, quarantine = split_dataframe(df, [2, 4, 6])
     assert len(clean) + len(quarantine) == len(df)
+
+def test_violation_reasons_groups_by_row():
+    from app.workers.celery_app import violation_reasons
+    vs = [
+        Violation(column="age", rule="range", message="", failed_rows=[1, 3]),
+        Violation(column="email", rule="unique", message="", failed_rows=[3, 5]),
+    ]
+    reasons = violation_reasons(vs)
+    assert reasons[1] == ["age: range"]
+    assert reasons[3] == ["age: range", "email: unique"]   # a row with two reasons
+    assert set(reasons.keys()) == {1, 3, 5}

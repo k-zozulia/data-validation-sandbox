@@ -1,7 +1,7 @@
 """Celery worker: runs the full batch validation asynchronously.
 
 Separate process from the API, so state is shared only through Redis. Export
-avoids storing a second copy of the data: only the quarantined row indices are
+avoids storing a second copy of the data: only the per-row violation reasons are
 kept, and the clean/quarantine split is redone on download.
 """
 from __future__ import annotations
@@ -44,6 +44,15 @@ def dirty_indices(violations: list[Violation]) -> list[int]:
     return sorted(dirty)
 
 
+def violation_reasons(violations: list[Violation]) -> dict[int, list[str]]:
+    """row index -> list of 'column: rule' reasons (a row may break several rules)."""
+    reasons: dict[int, list[str]] = {}
+    for v in violations:
+        for row in v.failed_rows:
+            reasons.setdefault(row, []).append(f"{v.column}: {v.rule}")
+    return reasons
+
+
 def split_dataframe(df: pd.DataFrame, dirty: list[int]):
     """Split into (clean, quarantine) by dirty row indices."""
     quarantine = df.loc[dirty] if dirty else df.iloc[0:0]
@@ -66,7 +75,8 @@ def full_validate_task(job_id: str) -> None:
         rules = parse_rules_yaml(data["rules_yaml"])
         violations = run_rules(df, rules)[: settings.max_violations_stored]
 
-        dirty = dirty_indices(violations)
+        reasons = violation_reasons(violations)
+        dirty = sorted(reasons.keys())
         result = {
             "row_count": len(df),
             "total_violations": len(violations),
@@ -77,7 +87,9 @@ def full_validate_task(job_id: str) -> None:
             "quarantine_rows": len(dirty),
             "exports": ["clean", "quarantine"],
         }
-        _r.set(_key(job_id, "quarantine_idx"), json.dumps(dirty), ex=ttl)
+        # store the reason map (keys as strings for JSON)
+        _r.set(_key(job_id, "reasons"),
+               json.dumps({str(k): v for k, v in reasons.items()}), ex=ttl)
         _r.set(_key(job_id, "result"), json.dumps(result), ex=ttl)
         _r.set(_key(job_id, "status"), "done", ex=ttl)
 
