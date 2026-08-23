@@ -32,7 +32,6 @@ export default function RulesEditor({ value, onChange }: Props) {
       height="320px"
       extensions={[yaml(), lintGutter(), yamlLinter]}
       onChange={onChange}
-      basicSetup={{ lineNumbers: true, foldGutter: true }}
     />
   );
 }
