@@ -238,3 +238,11 @@ frontend/build/
 # Artifacts
 *.log
 .pytest_cache/
+
+# Terraform
+infra/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log
+crash.*.log

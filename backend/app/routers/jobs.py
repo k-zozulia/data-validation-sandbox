@@ -1,7 +1,6 @@
 """Async batch jobs: enqueue a full run, poll it, and export clean/quarantine data."""
 from __future__ import annotations
 
-import base64
 import json
 import uuid
 
@@ -16,6 +15,10 @@ from app.workers.celery_app import full_validate_task
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
+def _input_key(job_id: str) -> str:
+    return f"jobs/{job_id}/input"
+
+
 @router.post("", response_model=JobCreatedResponse)
 async def create_job(file: UploadFile = File(...), rules_yaml: str = Form(...)):
     raw = await file.read()
@@ -26,12 +29,11 @@ async def create_job(file: UploadFile = File(...), rules_yaml: str = Form(...)):
 
     job_id = str(uuid.uuid4())
     ttl = settings.job_ttl_seconds
-    payload = json.dumps({
-        "filename": file.filename,
-        "file_b64": base64.b64encode(raw).decode(),
-        "rules_yaml": rules_yaml,
-    })
-    await storage.set_value(f"job:{job_id}:input", payload, ttl=ttl)
+
+    # Raw file bytes -> S3; lightweight metadata -> Redis.
+    storage.put_file(_input_key(job_id), raw)
+    meta = json.dumps({"filename": file.filename, "rules_yaml": rules_yaml})
+    await storage.set_value(f"job:{job_id}:meta", meta, ttl=ttl)
     await storage.set_value(f"job:{job_id}:status", "queued", ttl=ttl)
 
     full_validate_task.delay(job_id)
@@ -66,19 +68,19 @@ async def export_job(job_id: str, kind: str):
     if status != "done":
         raise AppException(409, "not_ready", f"Job is '{status}', export not available yet")
 
-    input_raw = await storage.get_value(f"job:{job_id}:input")
+    meta_raw = await storage.get_value(f"job:{job_id}:meta")
     reasons_raw = await storage.get_value(f"job:{job_id}:reasons")
-    if input_raw is None or reasons_raw is None:
+    file_bytes = storage.get_file(_input_key(job_id))
+    if meta_raw is None or reasons_raw is None or file_bytes is None:
         raise AppException(404, "export_not_found", "Export data expired or unavailable")
 
-    data = json.loads(input_raw)
-    df = load_dataframe(data["filename"], base64.b64decode(data["file_b64"]))
+    meta = json.loads(meta_raw)
+    df = load_dataframe(meta["filename"], file_bytes)
     reasons = {int(k): v for k, v in json.loads(reasons_raw).items()}
     dirty = sorted(reasons.keys())
 
     if kind == "quarantine":
         out_df = df.loc[dirty].copy()
-        # one readable column with all reasons per row: "age: range; email: unique"
         out_df["_violations"] = ["; ".join(reasons[i]) for i in dirty]
         csv_text = out_df.to_csv(index=False)
     else:

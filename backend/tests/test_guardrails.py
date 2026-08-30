@@ -61,7 +61,7 @@ def test_empty_csv_clean_error():
 
 
 def test_csv_bom_and_utf8():
-    raw = "\ufeffname,age\nОля,30\n".encode("utf-8")   # UTF-8 BOM + Cyrillic
+    raw = "\ufeffname,age\nОля,30\n".encode("utf-8")
     df = load_dataframe("d.csv", raw)
     assert len(df) == 1
 

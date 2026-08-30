@@ -35,19 +35,23 @@ def generate_rules(profile: DatasetProfile) -> dict:
     for name, col in profile.columns.items():
         checks: dict[str, dict] = {}
 
+        # A column that is almost never null is suggested as required.
         if col.null_pct < _NULL_REQUIRED_THRESHOLD_PCT:
             checks["not_null"] = {}
 
-        rule_dtype = _map_dtype(col.dtype)
-        if rule_dtype:
-            checks["dtype"] = {"expected": rule_dtype}
+        if col.is_array:
+            pass
+        else:
+            rule_dtype = _map_dtype(col.dtype)
+            if rule_dtype:
+                checks["dtype"] = {"expected": rule_dtype}
 
-        if col.min is not None and col.max is not None:
-            checks["range"] = {"min": col.min, "max": col.max}
+            if col.min is not None and col.max is not None:
+                checks["range"] = {"min": col.min, "max": col.max}
 
-        non_null = profile.row_count - col.null_count
-        if non_null > 1 and col.unique_count == non_null:
-            checks["unique"] = {}
+            non_null = profile.row_count - col.null_count
+            if non_null > 1 and col.unique_count == non_null:
+                checks["unique"] = {}
 
         if checks:
             columns[name] = checks

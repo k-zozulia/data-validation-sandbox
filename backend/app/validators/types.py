@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Callable
 
 import pandas as pd
@@ -47,28 +48,49 @@ def check_not_null(series: pd.Series, column: str) -> Violation | None:
                      failed_count=len(rows), failed_rows=rows)
 
 
-_DTYPE_CHECKS: dict[str, Callable[[pd.Series], bool]] = {
-    "int": pdt.is_integer_dtype,
-    "float": pdt.is_float_dtype,
-    "numeric": pdt.is_numeric_dtype,
-    "bool": pdt.is_bool_dtype,
-    "str": lambda s: pdt.is_object_dtype(s) or pdt.is_string_dtype(s),
-    "string": lambda s: pdt.is_object_dtype(s) or pdt.is_string_dtype(s),
-    "datetime": pdt.is_datetime64_any_dtype,
-}
+# Per-value type conformance. Coercion is intentional: "5" and 5.0 satisfy int,
+# "5.3" does not. Missing values are ignored here (not_null's concern).
+def _value_matches_type(value, expected: str) -> bool:
+    if expected in ("str", "string"):
+        return isinstance(value, str)
+    if expected == "bool":
+        if isinstance(value, bool):
+            return True
+        if isinstance(value, str):
+            return value.strip().lower() in ("true", "false", "0", "1")
+        return value in (0, 1)
+    if expected in ("int", "float", "numeric"):
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return False
+        if math.isnan(num) or math.isinf(num):
+            return False
+        if expected in ("float", "numeric"):
+            return True
+        return num == int(num)          # int: must be a whole number
+    return True                          # datetime/unknown: not checked per-value
+
+
+_KNOWN_DTYPES = {"int", "float", "numeric", "bool", "str", "string", "datetime"}
 
 
 @register("dtype")
 def check_dtype(series: pd.Series, column: str, expected: str) -> Violation | None:
-    check = _DTYPE_CHECKS.get(expected)
-    if check is None:
+    if expected not in _KNOWN_DTYPES:
         return Violation(column=column, rule="dtype",
                          message=f"Unknown expected dtype '{expected}'")
-    if check(series):
+    failed: list[int] = []
+    for idx, value in series.items():
+        if _is_missing(value):
+            continue
+        if not _value_matches_type(value, expected):
+            failed.append(int(idx))
+    if not failed:
         return None
     return Violation(column=column, rule="dtype",
-                     message=f"Column dtype is '{series.dtype}', expected '{expected}'",
-                     failed_count=int(series.notna().sum()))
+                     message=f"{len(failed)} value(s) do not conform to type '{expected}'",
+                     failed_count=len(failed), failed_rows=failed)
 
 
 @register("range")

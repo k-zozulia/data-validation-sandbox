@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
 
 
 class Settings(BaseSettings):
@@ -24,7 +25,15 @@ class Settings(BaseSettings):
     # clean/quarantine output goes to S3 (referenced by violations_ref).
     max_violations_stored: int = 10_000
 
-    cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
+    # Comma-separated list of allowed origins (overridable via env CORS_ORIGINS).
+    cors_origins_raw: str = Field(
+    default="http://localhost:5173,http://localhost:3000",
+    alias="CORS_ORIGINS",
+    )
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins_raw.split(",") if o.strip()]
 
 
 settings = Settings()

@@ -6,7 +6,6 @@ kept, and the clean/quarantine split is redone on download.
 """
 from __future__ import annotations
 
-import base64
 import json
 
 import pandas as pd
@@ -16,6 +15,7 @@ from celery import Celery
 from app.config import settings
 from app.models.schemas import AppException, Violation
 from app.parsers import load_dataframe
+from app.services import storage
 from app.services.yaml_generator import parse_rules_yaml
 from app.validators.rule_engine import run_rules
 
@@ -65,14 +65,14 @@ def full_validate_task(job_id: str) -> None:
     ttl = settings.job_ttl_seconds
     _r.set(_key(job_id, "status"), "running", ex=ttl)
     try:
-        payload = _r.get(_key(job_id, "input"))
-        if payload is None:
+        meta_raw = _r.get(_key(job_id, "meta"))
+        file_bytes = storage.get_file(f"jobs/{job_id}/input")
+        if meta_raw is None or file_bytes is None:
             raise AppException(404, "job_input_missing", "Job input has expired")
 
-        data = json.loads(payload)
-        raw = base64.b64decode(data["file_b64"])
-        df = load_dataframe(data["filename"], raw)             # full file, no nrows
-        rules = parse_rules_yaml(data["rules_yaml"])
+        meta = json.loads(meta_raw)
+        df = load_dataframe(meta["filename"], file_bytes)       # full file, no nrows
+        rules = parse_rules_yaml(meta["rules_yaml"])
         violations = run_rules(df, rules)[: settings.max_violations_stored]
 
         reasons = violation_reasons(violations)
@@ -87,7 +87,6 @@ def full_validate_task(job_id: str) -> None:
             "quarantine_rows": len(dirty),
             "exports": ["clean", "quarantine"],
         }
-        # store the reason map (keys as strings for JSON)
         _r.set(_key(job_id, "reasons"),
                json.dumps({str(k): v for k, v in reasons.items()}), ex=ttl)
         _r.set(_key(job_id, "result"), json.dumps(result), ex=ttl)

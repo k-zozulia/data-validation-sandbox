@@ -18,16 +18,27 @@ def test_not_null_flags_missing():
 
 
 # --- dtype ---
-@pytest.mark.parametrize("data,expected,ok", [
-    ([1, 2, 3], "int", True),
-    ([1.0, 2.5], "float", True),
-    (["a", "b"], "str", True),
-    ([1, 2, 3], "str", False),
-    (["a", "b"], "int", False),
-])
-def test_dtype(data, expected, ok):
-    result = check_dtype(pd.Series(data), "c", expected=expected)
-    assert (result is None) == ok
+def test_dtype_flags_only_the_offending_rows():
+    s = pd.Series([1, 2, 3, "abc", 5])
+    v = check_dtype(s, "age", expected="int")
+    assert v is not None
+    assert v.failed_rows == [3] 
+
+
+def test_dtype_allows_coercible_values():
+    s = pd.Series([1, "5", 5.0, 3])
+    assert check_dtype(s, "age", expected="int") is None 
+
+
+def test_dtype_rejects_non_whole_for_int():
+    s = pd.Series([1, 5.3, 3])
+    v = check_dtype(s, "age", expected="int")
+    assert v.failed_rows == [1]
+
+
+def test_dtype_ignores_nulls():
+    s = pd.Series([1, None, 3])
+    assert check_dtype(s, "age", expected="int") is None
 
 
 # --- range ---

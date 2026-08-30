@@ -1,0 +1,31 @@
+# ---- Stage 1: build dependencies ----
+FROM python:3.11-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /install
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install/deps -r requirements.txt
+
+
+# ---- Stage 2: runtime ----
+FROM python:3.11-slim AS runtime
+
+RUN useradd --create-home --uid 1000 appuser
+
+WORKDIR /app
+
+COPY --from=builder /install/deps /usr/local
+COPY app ./app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+USER appuser
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
