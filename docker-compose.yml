@@ -1,4 +1,42 @@
+# Local development stack: `docker compose up --build`
+#   UI       http://localhost:5173   (Vite dev server, hot reload)
+#   API      http://localhost:8000/api/docs
+# Source folders are bind-mounted, so code changes apply without rebuilding.
+name: dvs
+
+x-backend: &backend
+  build: ./backend
+  environment:
+    DATABASE_URL: postgresql+psycopg://dvs:dvs@postgres:5432/dvs
+    REDIS_URL: redis://redis:6379/0
+    STORAGE_BACKEND: local
+    STORAGE_DIR: /data/storage
+  volumes:
+    - ./backend:/app
+    - storage:/data
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: dvs
+      POSTGRES_PASSWORD: dvs
+      POSTGRES_DB: dvs
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dvs -d dvs"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   redis:
     image: redis:7-alpine
     ports:
@@ -7,34 +45,38 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
 
   api:
-    build: ./backend
+    <<: *backend
     ports:
       - "8000:8000"
-    environment:
-      REDIS_URL: redis://redis:6379/0
-      S3_BUCKET: dvs-data-419772658013
-      AWS_REGION: eu-central-1
-    volumes:
-      - ./backend:/app
-      - ~/.aws:/root/.aws:ro
-    depends_on:
-      redis:
-        condition: service_healthy
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   worker:
-    build: ./backend
+    <<: *backend
+    command: celery -A app.workers.celery_app.celery worker --loglevel=info --concurrency=2
+
+  web:
+    build:
+      context: ./frontend
+      target: dev
     environment:
-      REDIS_URL: redis://redis:6379/0
-      S3_BUCKET: dvs-data-419772658013
-      AWS_REGION: eu-central-1
+      API_PROXY_TARGET: http://api:8000
+    ports:
+      - "5173:5173"
     volumes:
-      - ./backend:/app
-      - ~/.aws:/root/.aws:ro
+      - ./frontend:/app
+      - /app/node_modules          # keep the container's node_modules
     depends_on:
-      redis:
-        condition: service_healthy
-    command: celery -A app.workers.celery_app.celery worker --loglevel=info
+      - api
+
+volumes:
+  pgdata:
+  storage:

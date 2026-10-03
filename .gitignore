@@ -246,3 +246,6 @@ infra/.terraform/
 *.tfvars
 crash.log
 crash.*.log
+# Local runtime data (SQLite DB, uploaded files)
+backend/data/
+data/

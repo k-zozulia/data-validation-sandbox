@@ -1,0 +1,26 @@
+# Example rule set for examples/customers.csv — load it from "Rule sets" or paste
+# it into the YAML tab of the dataset.
+columns:
+  customer_id:
+    not_null: {}
+    unique: {}
+  email:
+    not_null: {}
+    regex: { pattern: "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", message: "Not a valid e-mail address" }
+  age:
+    dtype: { expected: int }
+    range: { min: 18, max: 100 }
+  country:
+    allowed_values: { values: [UA, PL, DE, CZ] }
+  plan:
+    allowed_values: { values: [free, pro, team], severity: warning }
+  mrr:
+    range: { min: 0 }
+  signup_date:
+    date: { format: "%Y-%m-%d", min: "2020-01-01" }
+  last_login:
+    date: { format: "%Y-%m-%d" }
+    compare: { op: ">=", column: signup_date, message: "Last login before sign-up" }
+dataset:
+  row_count: { min: 100 }
+  unique_together: { columns: [email, country] }

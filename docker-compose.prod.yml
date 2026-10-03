@@ -1,0 +1,71 @@
+# Production-like stack (no bind mounts, no reload, static UI behind nginx):
+#   docker compose -f docker-compose.prod.yml up --build -d
+#   UI + API on http://localhost:8080  (nginx proxies /api to the API)
+# Set POSTGRES_PASSWORD in a .env file next to this one before exposing it anywhere.
+name: dvs-prod
+
+x-backend: &backend
+  build:
+    context: ./backend
+    dockerfile: Dockerfile.prod
+  restart: unless-stopped
+  environment:
+    DATABASE_URL: postgresql+psycopg://dvs:${POSTGRES_PASSWORD:-dvs}@postgres:5432/dvs
+    REDIS_URL: redis://redis:6379/0
+    STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+    STORAGE_DIR: /app/data/storage
+    S3_BUCKET: ${S3_BUCKET:-}
+    S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+  volumes:
+    - storage:/app/data
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dvs
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dvs}
+      POSTGRES_DB: dvs
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dvs -d dvs"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    <<: *backend
+
+  worker:
+    <<: *backend
+    command: celery -A app.workers.celery_app.celery worker --loglevel=info --concurrency=2
+
+  web:
+    build:
+      context: ./frontend
+      target: prod
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  storage:
