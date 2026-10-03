@@ -1,69 +1,74 @@
-import time
-
+"""Engine-level behaviour: severities, row issues, summary, missing columns."""
 import pandas as pd
+import pytest
 
-from app.validators.types import (
-    check_regex, check_array_length, check_array_items,
-)
-
-
-# --- regex ---
-def test_regex_passes():
-    s = pd.Series(["a@x.com", "b@y.com"])
-    assert check_regex(s, "email", pattern=r".+@.+\..+") is None
+from app.errors import AppException
+from app.validators.rule_engine import run_rules
 
 
-def test_regex_flags_nonmatching():
-    s = pd.Series(["a@x.com", "not-an-email", "c@y.com"])
-    v = check_regex(s, "email", pattern=r".+@.+\..+")
-    assert v.failed_count == 1 and v.failed_rows == [1]
+def test_engine_multiple_violations():
+    df = pd.DataFrame({"age": [-1, 200, 30], "id": [1, 1, 2]})
+    rules = {"columns": {"age": {"range": {"min": 0, "max": 120}}, "id": {"unique": {}}}}
+    result = run_rules(df, rules)
+    assert {v.rule for v in result.violations} == {"range", "unique"}
+    assert result.row_issues[0] == [("age", "range", "error"), ("id", "unique", "error")]
 
 
-def test_regex_invalid_pattern():
-    v = check_regex(pd.Series(["x"]), "c", pattern=r"(unclosed")
-    assert v is not None and "Invalid regex" in v.message
+def test_engine_all_pass():
+    df = pd.DataFrame({"age": [10, 20], "id": [1, 2]})
+    rules = {"columns": {"age": {"not_null": {}, "range": {"min": 0, "max": 120}},
+                         "id": {"unique": None}}}
+    result = run_rules(df, rules)
+    assert result.violations == []
+    assert result.summary(2)["score"] == 100.0
 
 
-def test_regex_redos_times_out():
-    # Catastrophic backtracking must be caught by the timeout, not hang.
-    s = pd.Series(["a" * 45 + "b"])
-    start = time.time()
-    v = check_regex(s, "c", pattern=r"(a|a)*$")
-    assert v is not None and "timed out" in v.message
-    assert time.time() - start < 3    # guarded, did not hang
+def test_missing_column_is_a_violation_once():
+    result = run_rules(pd.DataFrame({"a": [1]}),
+                       {"columns": {"ghost": {"not_null": {}, "unique": {}}}})
+    assert [v.rule for v in result.violations] == ["column_exists"]
 
 
-# --- array_length ---
-def test_array_length_passes():
-    s = pd.Series([["a", "b"], ["c"]])
-    assert check_array_length(s, "tags", min=1, max=3) is None
+def test_unknown_rule_rejected_before_running():
+    with pytest.raises(AppException) as exc:
+        run_rules(pd.DataFrame({"a": [1]}), {"columns": {"a": {"nonsense": {}}}})
+    assert exc.value.status_code == 422
+    assert "Unknown rule" in exc.value.extra["issues"][0]["message"]
 
 
-def test_array_length_flags_too_long():
-    s = pd.Series([["a", "b", "c", "d"], ["e"]])
-    v = check_array_length(s, "tags", max=2)
-    assert v.failed_count == 1 and v.failed_rows == [0]
+def test_warnings_do_not_quarantine():
+    df = pd.DataFrame({"age": [10, 130, None]})
+    rules = {"columns": {"age": {"not_null": {},
+                                 "range": {"max": 120, "severity": "warning",
+                                           "message": "suspiciously old"}}}}
+    result = run_rules(df, rules)
+    s = result.summary(3)
+    assert s["quarantine_rows"] == 1 and s["warning_rows"] == 1 and s["clean_rows"] == 2
+    assert s["warning_only_rows"] == 1
+    warn = next(v for v in result.violations if v.rule == "range")
+    assert warn.severity == "warning" and warn.message == "suspiciously old"
 
 
-def test_array_length_flags_non_array():
-    s = pd.Series([["a"], "not-a-list"])
-    v = check_array_length(s, "tags", min=1)
-    assert v.failed_rows == [1]
+def test_disabled_check_is_skipped():
+    result = run_rules(pd.DataFrame({"a": [None]}), {"columns": {"a": {"not_null": False}}})
+    assert result.checks == [] and result.violations == []
 
 
-# --- array_items ---
-def test_array_items_type_passes():
-    s = pd.Series([[1, 2, 3], [4, 5]])
-    assert check_array_items(s, "scores", type="int") is None
+def test_dataset_rules_and_progress():
+    df = pd.DataFrame({"a": [1, 1], "b": [2, 2]})
+    seen = []
+    result = run_rules(df, {"dataset": {"row_count": {"min": 5},
+                                        "unique_together": {"columns": ["a", "b"]}}},
+                       on_progress=seen.append)
+    assert {v.rule for v in result.violations} == {"row_count", "unique_together"}
+    assert seen[-1] == 1.0
+    assert result.summary(2)["quarantine_rows"] == 2
 
 
-def test_array_items_type_flags():
-    s = pd.Series([[1, 2], [3, "x"]])
-    v = check_array_items(s, "scores", type="int")
-    assert v.failed_rows == [1]
-
-
-def test_array_items_range_flags():
-    s = pd.Series([[10, 20], [10, 200]])
-    v = check_array_items(s, "scores", min=0, max=100)
-    assert v.failed_rows == [1]
+def test_failed_rows_are_capped_but_counted(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "max_failed_rows_per_violation", 3)
+    result = run_rules(pd.DataFrame({"a": [None] * 10}), {"columns": {"a": {"not_null": {}}}})
+    v = result.violations[0]
+    assert v.failed_count == 10 and len(v.failed_rows) == 3
+    assert len(result.row_issues) == 10

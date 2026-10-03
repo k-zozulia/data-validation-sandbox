@@ -1,69 +1,94 @@
+"""Object storage for uploaded files and job artifacts.
+
+The single point of storage abstraction: the database keeps metadata, while raw
+bytes (source files, per-row validation results) live here. Locally that's a
+directory (a Docker volume); for a cloud deployment switch STORAGE_BACKEND=s3,
+which also works with any S3-compatible store such as MinIO.
+"""
 from __future__ import annotations
 
-import boto3
-from botocore.exceptions import ClientError
-import redis.asyncio as aioredis
+import shutil
+from functools import lru_cache
+from pathlib import Path
+from typing import Protocol
 
 from app.config import settings
 
-_redis: aioredis.Redis | None = None
-_s3 = None  # lazily created boto3 S3 client
+
+class Storage(Protocol):
+    def put(self, key: str, data: bytes) -> None: ...
+    def get(self, key: str) -> bytes | None: ...
+    def delete_prefix(self, prefix: str) -> None: ...
+    def ping(self) -> bool: ...
 
 
-def init_redis() -> aioredis.Redis:
-    """Called once at application startup (lifespan in main.py)."""
-    global _redis
-    _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
-    return _redis
+class LocalStorage:
+    def __init__(self, root: Path):
+        self.root = root.resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, key: str) -> Path:
+        path = (self.root / key).resolve()
+        if not path.is_relative_to(self.root):          # no "../" escapes
+            raise ValueError(f"Invalid storage key: {key!r}")
+        return path
+
+    def put(self, key: str, data: bytes) -> None:
+        path = self._path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_bytes(data)
+        tmp.replace(path)                                 # atomic on POSIX
+
+    def get(self, key: str) -> bytes | None:
+        path = self._path(key)
+        return path.read_bytes() if path.is_file() else None
+
+    def delete_prefix(self, prefix: str) -> None:
+        path = self._path(prefix)
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        elif path.is_file():
+            path.unlink(missing_ok=True)
+
+    def ping(self) -> bool:
+        return self.root.is_dir()
 
 
-def get_redis() -> aioredis.Redis:
-    if _redis is None:
-        raise RuntimeError("Redis is not initialized - call init_redis() in lifespan")
-    return _redis
+class S3Storage:
+    def __init__(self, bucket: str, endpoint_url: str | None = None):
+        import boto3  # imported lazily: only needed for the S3 backend
+
+        self.bucket = bucket
+        self.client = boto3.client("s3", endpoint_url=endpoint_url)
+
+    def put(self, key: str, data: bytes) -> None:
+        self.client.put_object(Bucket=self.bucket, Key=key, Body=data)
+
+    def get(self, key: str) -> bytes | None:
+        from botocore.exceptions import ClientError
+
+        try:
+            return self.client.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] in ("NoSuchKey", "404"):
+                return None
+            raise
+
+    def delete_prefix(self, prefix: str) -> None:
+        paginator = self.client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            keys = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+            if keys:
+                self.client.delete_objects(Bucket=self.bucket, Delete={"Objects": keys})
+
+    def ping(self) -> bool:
+        self.client.head_bucket(Bucket=self.bucket)
+        return True
 
 
-async def close_redis() -> None:
-    if _redis is not None:
-        await _redis.aclose()
-
-
-async def ping() -> bool:
-    return await get_redis().ping()
-
-
-async def set_value(key: str, value: str, ttl: int | None = None) -> None:
-    await get_redis().set(key, value, ex=ttl)
-
-
-async def get_value(key: str) -> str | None:
-    return await get_redis().get(key)
-
-
-# --- Object storage (S3) for the raw file bytes -----------------------------
-# The single point of storage abstraction: files live in S3, while Redis keeps
-# only lightweight state (status, rules, reasons, result). Credentials come from
-# the environment (aws configure locally, IAM task role in the cloud).
-
-def _s3_client():
-    """Create the S3 client once and reuse it (boto3 clients are thread-safe)."""
-    global _s3
-    if _s3 is None:
-        _s3 = boto3.client("s3")
-    return _s3
-
-
-def put_file(key: str, data: bytes) -> None:
-    """Store raw file bytes in the S3 bucket under the given key."""
-    _s3_client().put_object(Bucket=settings.s3_bucket, Key=key, Body=data)
-
-
-def get_file(key: str) -> bytes | None:
-    """Read raw file bytes back from S3; returns None if the object is gone."""
-    try:
-        resp = _s3_client().get_object(Bucket=settings.s3_bucket, Key=key)
-        return resp["Body"].read()
-    except ClientError as exc:
-        if exc.response["Error"]["Code"] in ("NoSuchKey", "404"):
-            return None
-        raise
+@lru_cache(maxsize=1)
+def get_storage() -> Storage:
+    if settings.storage_backend == "s3":
+        return S3Storage(settings.s3_bucket, settings.s3_endpoint_url)
+    return LocalStorage(settings.storage_dir)

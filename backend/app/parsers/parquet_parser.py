@@ -7,12 +7,12 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from app.config import settings
-from app.models.schemas import AppException
+from app.errors import AppException
 
 
-def parse_parquet(source: bytes, nrows: int | None = None) -> pd.DataFrame:
+def parse_parquet(raw: bytes) -> pd.DataFrame:
     try:
-        pf = pq.ParquetFile(io.BytesIO(source))
+        pf = pq.ParquetFile(io.BytesIO(raw))
     except Exception as exc:
         raise AppException(400, "invalid_parquet", f"Could not read Parquet: {exc}")
 
@@ -21,21 +21,16 @@ def parse_parquet(source: bytes, nrows: int | None = None) -> pd.DataFrame:
         raise AppException(413, "too_many_columns",
                            f"{meta.num_columns} columns exceeds the limit "
                            f"of {settings.max_columns}")
-    if meta.num_rows > settings.max_rows_full_run:
+    if meta.num_rows > settings.max_rows:
         raise AppException(413, "too_many_rows",
-                           f"{meta.num_rows} rows exceeds the limit "
-                           f"of {settings.max_rows_full_run}")
+                           f"{meta.num_rows} rows exceeds the limit of {settings.max_rows}")
 
     # Estimated uncompressed size across row groups (decompression-bomb guard).
-    budget = settings.max_file_size_mb * 8 * 1024 * 1024
+    budget = settings.max_file_bytes * 8
     uncompressed = sum(meta.row_group(i).total_byte_size
                        for i in range(meta.num_row_groups))
     if uncompressed > budget:
         raise AppException(413, "parquet_too_large",
                            f"Uncompressed size ~{uncompressed // (1024 * 1024)} MB "
                            f"exceeds the in-memory budget")
-
-    if nrows is not None:
-        batch = next(pf.iter_batches(batch_size=nrows), None)
-        return batch.to_pandas() if batch is not None else pd.DataFrame()
     return pf.read().to_pandas()

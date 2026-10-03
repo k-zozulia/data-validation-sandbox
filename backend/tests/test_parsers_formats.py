@@ -4,32 +4,42 @@ import json
 import pandas as pd
 import pytest
 
+from app.errors import AppException
 from app.parsers import load_dataframe
-from app.parsers.json_parser import parse_json
+from app.parsers.json_parser import parse_json, parse_jsonl
 from app.parsers.parquet_parser import parse_parquet
-from app.models.schemas import AppException
+
+
+def _parquet_bytes(df: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    df.to_parquet(buf, index=False)
+    return buf.getvalue()
+
+
+def _xlsx_bytes(df: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False)
+    return buf.getvalue()
 
 
 # --- JSON ---
 def test_json_array_of_records():
-    data = json.dumps([{"name": "Anna", "age": 30}, {"name": "Ivan", "age": 25}]).encode()
-    df = parse_json(data)
+    df = parse_json(json.dumps([{"name": "Anna", "age": 30}, {"name": "Ivan"}]).encode())
     assert list(df.columns) == ["name", "age"] and len(df) == 2
 
 
 def test_json_flattens_nested_objects():
-    data = json.dumps([{"name": "Anna", "addr": {"city": "Kyiv"}}]).encode()
-    df = parse_json(data)
-    assert "addr.city" in df.columns and df["addr.city"][0] == "Kyiv"
+    df = parse_json(json.dumps([{"name": "Anna", "addr": {"city": "Kyiv"}}]).encode())
+    assert df["addr.city"][0] == "Kyiv"
 
 
-def test_json_single_object_ok():
-    df = parse_json(json.dumps({"a": 1}).encode())
-    assert len(df) == 1
+def test_json_wrapper_object():
+    df = parse_json(json.dumps({"data": [{"a": 1}, {"a": 2}]}).encode())
+    assert len(df) == 2
 
 
 def test_json_too_deep_raises():
-    deep = {"a": {"b": {"c": {"d": {"e": {"f": 1}}}}}}   # depth 6 > default 5
+    deep = {"a": {"b": {"c": {"d": {"e": {"f": 1}}}}}}
     with pytest.raises(AppException) as exc:
         parse_json(json.dumps([deep]).encode())
     assert exc.value.error == "json_too_deep"
@@ -41,27 +51,21 @@ def test_json_invalid_raises():
     assert exc.value.status_code == 400
 
 
-def test_json_nrows_samples():
-    data = json.dumps([{"n": i} for i in range(10)]).encode()
-    assert len(parse_json(data, nrows=3)) == 3
+def test_jsonl():
+    df = parse_jsonl(b'{"a": 1}\n\n{"a": 2, "b": [1, 2]}\n')
+    assert len(df) == 2 and df["b"][1] == [1, 2]
 
 
-# --- Parquet ---
-def _parquet_bytes(df: pd.DataFrame) -> bytes:
-    buf = io.BytesIO()
-    df.to_parquet(buf, index=False)
-    return buf.getvalue()
+def test_jsonl_bad_line():
+    with pytest.raises(AppException) as exc:
+        parse_jsonl(b'{"a": 1}\n{oops\n')
+    assert "Line 2" in exc.value.detail
 
 
+# --- Parquet / XLSX ---
 def test_parquet_roundtrip():
-    raw = _parquet_bytes(pd.DataFrame({"id": [1, 2, 3], "name": ["a", "b", "c"]}))
-    df = parse_parquet(raw)
+    df = parse_parquet(_parquet_bytes(pd.DataFrame({"id": [1, 2, 3], "name": list("abc")})))
     assert list(df.columns) == ["id", "name"] and len(df) == 3
-
-
-def test_parquet_nrows_samples():
-    raw = _parquet_bytes(pd.DataFrame({"n": range(100)}))
-    assert len(parse_parquet(raw, nrows=10)) == 10
 
 
 def test_parquet_invalid_raises():
@@ -70,15 +74,22 @@ def test_parquet_invalid_raises():
     assert exc.value.status_code == 400
 
 
+def test_xlsx_roundtrip():
+    df, fmt = load_dataframe("book.xlsx", _xlsx_bytes(pd.DataFrame({"a": [1, 2]})))
+    assert fmt == "xlsx" and list(df["a"]) == [1, 2]
+
+
 # --- dispatcher ---
-def test_dispatch_by_extension():
-    jdata = json.dumps([{"a": 1}]).encode()
-    assert len(load_dataframe("x.json", jdata)) == 1
-    pdata = _parquet_bytes(pd.DataFrame({"a": [1, 2]}))
-    assert len(load_dataframe("x.parquet", pdata)) == 2
+def test_dispatch_by_extension_and_clean_index():
+    df, fmt = load_dataframe("x.json", json.dumps([{"a": 1}, {"a": 2}]).encode())
+    assert fmt == "json" and list(df.index) == [0, 1]
+    df, fmt = load_dataframe("x.ndjson", b'{"a": 1}\n')
+    assert fmt == "jsonl"
+    df, fmt = load_dataframe("x.tsv", b"a\tb\n1\t2\n")
+    assert fmt == "csv" and list(df.columns) == ["a", "b"]
 
 
 def test_dispatch_unknown_format():
     with pytest.raises(AppException) as exc:
-        load_dataframe("x.txt", b"whatever")
+        load_dataframe("x.docx", b"whatever")
     assert exc.value.error == "unsupported_format"

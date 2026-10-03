@@ -1,31 +1,23 @@
+# Production image: no dev deps, no reload, non-root user.
+# Same image serves the API (default CMD) and the worker (override the command).
+
 # ---- Stage 1: build dependencies ----
-FROM python:3.11-slim AS builder
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
+FROM python:3.12-slim AS builder
 WORKDIR /install
-
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install/deps -r requirements.txt
 
-
 # ---- Stage 2: runtime ----
-FROM python:3.11-slim AS runtime
-
-RUN useradd --create-home --uid 1000 appuser
-
-WORKDIR /app
-
-COPY --from=builder /install/deps /usr/local
-COPY app ./app
-
+FROM python:3.12-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
-
+RUN useradd --create-home --uid 1000 appuser
+WORKDIR /app
+COPY --from=builder /install/deps /usr/local
+COPY alembic.ini ./
+COPY alembic ./alembic
+COPY app ./app
+RUN mkdir -p /app/data && chown -R appuser /app/data
 USER appuser
-
 EXPOSE 8000
-
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2"]
